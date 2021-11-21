@@ -11,13 +11,12 @@ namespace ServiceBusMessageOrdering
     public class Subscriber
     {
         private const string ServiceBusConnectionString = "xpto";
-        private const string TopicToListen = "xpto";
+        private const string TopicName = "xpto";
         private const string SubscriptionName = "sub-xpto";
         private const short MaxNumberOfActiveSessions = 1;
         
         private static readonly object _messageLockerObject = new object();
-        private static SubscriptionClient _client;
-        private static JsonSerializer _serializer;
+        private static SubscriptionClient _client = new SubscriptionClient(ServiceBusConnectionString, TopicName, SubscriptionName);
         private TimeSpan _messageWaitTimeoutInSeconds = TimeSpan.FromSeconds(5);
         private TimeSpan _taskDelayInMinutes = TimeSpan.FromMinutes(5);
 
@@ -203,9 +202,9 @@ namespace ServiceBusMessageOrdering
         }
         
         private SessionStateControl DeserializedSessionState(byte[] stateMetadata) =>
-            _serializer.Deserialize<SessionStateControl>(stateMetadata);
+            JsonSerializer.Deserialize<SessionStateControl>(stateMetadata);
         
         private static byte[] SerializedSessionState(SessionStateControl sessionState) =>
-            _serializer.Serialize<>(sessionState);
+            JsonSerializer.Serialize<SessionStateControl>(sessionState);
     }
 }
