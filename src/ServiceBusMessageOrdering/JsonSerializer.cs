@@ -3,12 +3,12 @@ using Newtonsoft.Json;
 
 namespace ServiceBusMessageOrdering
 {
-    public class JsonSerializer
+    public static class JsonSerializer
     {
-        public byte[] Serialize<T>(T item) =>
+        public static byte[] Serialize<T>(T item) =>
         Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(item));
         
-        public T Deserialize<T>(byte[] item) =>
+        public static T Deserialize<T>(byte[] item) =>
             JsonConvert.DeserializeObject<T>(Encoding.UTF8.GetString(item));
     }
 }
