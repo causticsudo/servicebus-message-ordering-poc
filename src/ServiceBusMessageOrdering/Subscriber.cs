@@ -93,20 +93,15 @@ namespace ServiceBusMessageOrdering
                                     CloseSession(session);
                                 }
                             }
-                            //Return message to queue
                             else
                             {
-                                //TODO: change this
-                                // await _client.DeadLetterAsync(GetMessageLockToken(message),
-                                //     "The message cannot be processed", "Cannot deserialize this message");
-
-                                //TODO: to this
+                                //Return message to queue
                                 await _messageSender.SendAsync(message);
                             }
                         }
-                        //If it's the message with the wrong version
                         else
                         {
+                            //If it's the message with the wrong version
                             //Put message in the deferred list
                             sessionState.DeferredMessages.Add(GetAggregateVersionByMessage(message),
                                 GetSequenceIdByMessage(message));
@@ -165,7 +160,6 @@ namespace ServiceBusMessageOrdering
                     //Update the session state
                     await session.SetStateAsync(SerializedSessionState(sessionState));
                 }
-                //If the message was not processed
                 else
                 {
                     //schedule the message to be processed after `x` minutes
