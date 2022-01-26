@@ -58,7 +58,7 @@ namespace ServiceBusMessageOrdering
                 {
                     try
                     {
-                        //Connect to session
+                        //Get session state
                         var stateMetadata = await session.GetStateAsync();
 
                         //Exists metadata ?
