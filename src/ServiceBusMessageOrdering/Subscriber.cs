@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.ServiceBus;
+using Microsoft.Azure.ServiceBus.Core;
 
 namespace ServiceBusMessageOrdering
 {
@@ -14,9 +15,13 @@ namespace ServiceBusMessageOrdering
         private const string TopicName = "xpto";
         private const string SubscriptionName = "sub-xpto";
         private const short MaxNumberOfActiveSessions = 1;
+
         
         private static readonly object _messageLockerObject = new object();
         private static SubscriptionClient _client = new SubscriptionClient(ServiceBusConnectionString, TopicName, SubscriptionName);
+        private static MessageSender _messageSender = new MessageSender(ServiceBusConnectionString, TopicName);
+        
+        private static DateTimeOffset SchedulerTimeInUtc = DateTimeOffset.UtcNow;
         private TimeSpan _messageWaitTimeoutInSeconds = TimeSpan.FromSeconds(5);
         private TimeSpan _taskDelayInMinutes = TimeSpan.FromMinutes(5);
 
@@ -92,8 +97,11 @@ namespace ServiceBusMessageOrdering
                             else
                             {
                                 //TODO: change this
-                                await _client.DeadLetterAsync(GetMessageLockToken(message),
-                                    "The message cannot be processed", "Cannot deserialize this message");
+                                // await _client.DeadLetterAsync(GetMessageLockToken(message),
+                                //     "The message cannot be processed", "Cannot deserialize this message");
+
+                                //TODO: to this
+                                await _messageSender.SendAsync(message);
                             }
                         }
                         //If it's the message with the wrong version
@@ -161,9 +169,7 @@ namespace ServiceBusMessageOrdering
                 else
                 {
                     //schedule the message to be processed after `x` minutes
-                    //TODO: change this
-                    await _client.DeadLetterAsync(GetMessageLockToken(deferredMessage),
-                        "The message cannot be processed", "Cannot deserialize this message");
+                    await _messageSender.ScheduleMessageAsync(deferredMessage, SchedulerTimeInUtc);
                 }
 
                 expectedVersion++;
@@ -228,6 +234,6 @@ namespace ServiceBusMessageOrdering
             JsonSerializer.Deserialize<SessionStateControl>(stateMetadata);
         
         private static byte[] SerializedSessionState(SessionStateControl sessionState) =>
-            JsonSerializer.Serialize<SessionStateControl>(sessionState);
+            JsonSerializer.Serialize<>(sessionState);
     }
 }
