@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.ServiceBus;
+using Microsoft.Azure.ServiceBus.Core;
 
 namespace ServiceBusMessageOrdering
 {
@@ -14,9 +15,13 @@ namespace ServiceBusMessageOrdering
         private const string TopicName = "xpto";
         private const string SubscriptionName = "sub-xpto";
         private const short MaxNumberOfActiveSessions = 1;
+
         
         private static readonly object _messageLockerObject = new object();
         private static SubscriptionClient _client = new SubscriptionClient(ServiceBusConnectionString, TopicName, SubscriptionName);
+        private static MessageSender _messageSender = new MessageSender(ServiceBusConnectionString, TopicName);
+        
+        private static DateTimeOffset SchedulerTimeInUtc = DateTimeOffset.UtcNow;
         private TimeSpan _messageWaitTimeoutInSeconds = TimeSpan.FromSeconds(5);
         private TimeSpan _taskDelayInMinutes = TimeSpan.FromMinutes(5);
 
@@ -40,12 +45,12 @@ namespace ServiceBusMessageOrdering
 
         private async Task GetListenersAsync(CancellationToken token)
         {
-            var isDoneReceivedSuccessfully = new TaskCompletionSource<bool>();
+            var isReceivedSuccessfully = new TaskCompletionSource<bool>();
             
             token.Register(async () =>
             {
                 await _client.CloseAsync();
-                isDoneReceivedSuccessfully.SetResult(true);
+                isReceivedSuccessfully.SetResult(true);
             });
             
             _client.RegisterSessionHandler(
@@ -53,41 +58,60 @@ namespace ServiceBusMessageOrdering
                 {
                     try
                     {
+                        //Get session state
                         var stateMetadata = await session.GetStateAsync();
 
+                        //Exists metadata ?
                         var sessionState = (IsEmptyStateMetadata(stateMetadata))
                             ? new SessionStateControl() 
                             : DeserializedSessionState(stateMetadata);
 
+                        //Get first queue message and check if it's the next message in the sequence
                         if (IsNextMessageInSequence(message, sessionState))
                         {
+                            //Process message
                             if (ProcessMessages(message))
                             {
                                 await session.CompleteAsync(GetMessageLockToken(message));
 
+                                //Save the version with the last one successfully processed
                                 sessionState.LastProcessedVersion = GetAggregateVersionByMessage(message);
 
+                                //Update the session state
                                 await session.SetStateAsync(SerializedSessionState(sessionState));
 
+                                //Commit message
+                                //TODO: implement logic
+                                
+                                //Process the deferred messages
+                                await ProcessNextDeferredMessages(session, sessionState);
+                                
+                                //If is the last message
                                 if (IsLastMessage(message))
                                 {
+                                    //Clean and Close the session
                                     CloseSession(session);
                                 }
                             }
                             else
                             {
-                                await _client.DeadLetterAsync(GetMessageLockToken(message),
-                                    "The message cannot be processed", "Cannot deserialize this message");
+                                //Return message to queue
+                                await _messageSender.SendAsync(message);
                             }
                         }
                         else
                         {
-                            sessionState.DeferredMessages.Add(GetAggregateVersionByMessage(message), GetSequenceIdByMessage(message));
+                            //If it's the message with the wrong version
+                            //Put message in the deferred list
+                            sessionState.DeferredMessages.Add(GetAggregateVersionByMessage(message),
+                                GetSequenceIdByMessage(message));
+                            
+                            //Defer message
                             await session.DeferAsync(GetMessageLockToken(message));
+                            
+                            //Update the session state
                             await session.SetStateAsync(SerializedSessionState(sessionState));
                         }
-
-                        await ProcessNextDeferredMessages(session, sessionState);
                     }
                     catch (Exception e)
                     {
@@ -101,49 +125,45 @@ namespace ServiceBusMessageOrdering
                     AutoComplete = false
                 });
 
-            await isDoneReceivedSuccessfully.Task;
+            await isReceivedSuccessfully.Task;
         }
 
         private static async Task ProcessNextDeferredMessages(IMessageSession session, SessionStateControl sessionState)
         {
-            var expectedVersion = (short)(sessionState.LastProcessedVersion + 1);
+            var expectedVersion = CalculateTheNextExpectedVersion(sessionState);
 
             long deferredMessageSequenceId;
 
             while (true)
             {
+                //Search the list of deferred messages to next with the version expected
                 if (!TryGetDeferredMessageSequenceIdByExpectedVersion(sessionState, expectedVersion, out deferredMessageSequenceId))
                 {
+                    //if not there is a message with the expected version, return
                     break;
                 }
 
+                //Redeem the message via sequence id
                 var deferredMessage = await session.ReceiveDeferredMessageAsync(deferredMessageSequenceId);
 
+                //Process message based on your sequenceId
                 if (ProcessMessages(deferredMessage))
                 {
                     await session.CompleteAsync(GetMessageLockToken(deferredMessage));
 
-                    if (IsLastMessage(deferredMessage))
-                    {
-                        CloseSession(session);
-                    }
-                    else
-                    {
-                        sessionState.LastProcessedVersion = GetAggregateVersionByMessage(deferredMessage);
+                    //Save the version with the last one successfully processed
+                    sessionState.LastProcessedVersion = GetAggregateVersionByMessage(deferredMessage);
 
-                        sessionState.DeferredMessages.Remove(expectedVersion);
+                    //Remove the message from the message list deferred
+                    sessionState.DeferredMessages.Remove(expectedVersion);
 
-                        await session.SetStateAsync(SerializedSessionState(sessionState));
-                    }
+                    //Update the session state
+                    await session.SetStateAsync(SerializedSessionState(sessionState));
                 }
                 else
                 {
-                    await _client.DeadLetterAsync(GetMessageLockToken(deferredMessage),
-                        "The message cannot be processed", "Cannot deserialize this message");
-
-                    sessionState.DeferredMessages.Remove(expectedVersion);
-
-                    await session.SetStateAsync(SerializedSessionState(sessionState));
+                    //schedule the message to be processed after `x` minutes
+                    await _messageSender.ScheduleMessageAsync(deferredMessage, SchedulerTimeInUtc);
                 }
 
                 expectedVersion++;
@@ -154,13 +174,13 @@ namespace ServiceBusMessageOrdering
         {
             lock (_messageLockerObject)
             {
-                var messageProcessSuch = $"\nMessage received: \nMessageId = {message.MessageId}," +
+                var suchMessageToProcess = $"\nMessage received: \nMessageId = {message.MessageId}," +
                                          $" \nSequenceNumber = {message.SystemProperties.SequenceNumber}," +
                                          $" \nEnqueuedTimeUtc = {message.SystemProperties.EnqueuedTimeUtc}," +
                                          $"\nSession: {message.SessionId}," +
                                          $"\nOrder: {GetAggregateVersionByMessage(message)}";
 
-                Console.WriteLine(messageProcessSuch);
+                Console.WriteLine(suchMessageToProcess);
             }
 
             return true;
@@ -176,6 +196,9 @@ namespace ServiceBusMessageOrdering
         {
             return sessionState.DeferredMessages.TryGetValue(expectedVersion, out deferredMessageSequenceId);
         }
+        
+        private static short CalculateTheNextExpectedVersion(SessionStateControl session)
+            => (short)(session.LastProcessedVersion + 1);
         
         private bool IsEmptyStateMetadata(byte[] stateMetadata) =>
             stateMetadata is null;
@@ -205,6 +228,6 @@ namespace ServiceBusMessageOrdering
             JsonSerializer.Deserialize<SessionStateControl>(stateMetadata);
         
         private static byte[] SerializedSessionState(SessionStateControl sessionState) =>
-            JsonSerializer.Serialize<SessionStateControl>(sessionState);
+            JsonSerializer.Serialize<>(sessionState);
     }
 }
